@@ -1,10 +1,12 @@
 import os
+import sys
 import argparse
 from google import genai
 from google.genai import types
-
-
 from dotenv import load_dotenv
+
+from prompts import system_prompt
+from call_function import available_functions, call_function
 
 def main():
     load_dotenv()
@@ -23,16 +25,56 @@ def main():
     ]
 
     client = genai.Client(api_key=api_key)
-    response = client.models.generate_content(model='gemini-2.5-flash', contents=messages)
-    
-    if (response.usage_metadata is None):
-        raise Exception("failed api request")
-    
-    if args.verbose:
-        print(f"User prompt: {args.user_prompt}")
-        print(f"Prompt tokens: {response.usage_metadata.prompt_token_count}")
-        print(f"Response tokens: {response.usage_metadata.candidates_token_count}")
-    print(f"Response:\n{response.text}")
+
+    for _ in range(20):
+        function_results = []
+        response = client.models.generate_content(
+            model='gemini-2.5-flash', 
+            contents=messages,
+            config=types.GenerateContentConfig(
+                tools=[available_functions],
+                system_instruction=system_prompt,
+            )
+        )
+
+        if (response.usage_metadata is None):
+            raise Exception("failed api request")
+
+        if response.candidates:
+            for candidate in response.candidates:
+                if candidate.content:
+                    messages.append(candidate.content)
+        
+        if args.verbose:
+            print(f"User prompt: {args.user_prompt}")
+            print(f"Prompt tokens: {response.usage_metadata.prompt_token_count}")
+            print(f"Response tokens: {response.usage_metadata.candidates_token_count}")
+
+        if response.function_calls:
+            for function_call in response.function_calls:
+                print(f"- Calling function: {function_call.name}")
+                function_call_result = call_function(function_call)
+
+                if not function_call_result.parts:
+                    raise Exception("function call failed")
+                if not function_call_result.parts[0].function_response:
+                    raise Exception("function call failed")
+                if not function_call_result.parts[0].function_response.response:
+                    raise Exception("function call failed")
+
+                function_results.append(function_call_result.parts[0])
+                if args.verbose:
+                    print(f"-> {function_call_result.parts[0].function_response.response}")
+            messages.append(types.Content(role="user", parts=function_results))
+
+        else:
+            print(response.text)
+            return
+
+    else:
+        print("Agent failed to produce a final response after reaching the iteration limit.")
+        sys.exit(1)
+
 
 
 if __name__ == "__main__":
